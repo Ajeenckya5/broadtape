@@ -122,20 +122,17 @@ python app.py</pre>
   </div>
   <script>
     function tick() {
-      const fmt = (tz) => new Date().toLocaleTimeString("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
-      const ny = new Date().toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
-      const partsNy = ny.split(", ");
-      const dow = partsNy[0];
-      const hm = fmt("America/New_York");
-      const ist = fmt("Asia/Kolkata");
+      const hmOf = (tz) => new Date().toLocaleTimeString("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
+      const dowOf = (tz) => new Date().toLocaleDateString("en-US", { timeZone: tz, weekday: "short" });
+      const hm = hmOf("America/New_York");
+      const ist = hmOf("Asia/Kolkata");
       const [h, m] = hm.split(":").map(Number);
       const mins = h * 60 + m;
-      const weekday = !["Sat", "Sun"].includes(dow);
-      const nyOpen = weekday && mins >= 9 * 60 + 30 && mins < 16 * 60;
-      const istDate = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", weekday: "short" });
+      const nyWeekday = !["Sat", "Sun"].includes(dowOf("America/New_York"));
+      const nyOpen = nyWeekday && mins >= 9 * 60 + 30 && mins < 16 * 60;
       const [ih, im] = ist.split(":").map(Number);
       const imins = ih * 60 + im;
-      const nseOpen = !["Sat", "Sun"].includes(istDate) && imins >= 9 * 60 + 15 && imins < 15 * 60 + 30;
+      const nseOpen = !["Sat", "Sun"].includes(dowOf("Asia/Kolkata")) && imins >= 9 * 60 + 15 && imins < 15 * 60 + 30;
       document.getElementById("clocks").innerHTML =
         `<span><i class="dot ${nyOpen ? "open" : ""}"></i><strong>NYSE</strong>${hm} ET</span>` +
         `<span><i class="dot ${nseOpen ? "open" : ""}"></i><strong>NSE</strong>${ist} IST</span>`;
