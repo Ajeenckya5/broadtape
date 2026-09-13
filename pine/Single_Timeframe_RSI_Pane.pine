@@ -1,0 +1,55 @@
+//@version=5
+// Companion pane for "Single-Timeframe RSI + Stochastic".
+// Set Mode to the SAME value as the strategy so RSI is never mixed with another TF.
+// This script does not trade; it only plots RSI from the selected timeframe.
+
+indicator(
+     title      = "Single-Timeframe RSI",
+     shorttitle = "STF RSI",
+     overlay    = false,
+     precision  = 2)
+
+string modeInput = input.string(
+     "Swing (Hourly)",
+     "Mode",
+     options = ["Swing (Hourly)", "Intraday (15-min)"],
+     group   = "1. Timeframe discipline",
+     tooltip = "Must match the strategy Mode. RSI is read only from this timeframe.")
+
+int rsiLength = input.int(
+     14, "RSI length", minval = 1, group = "2. RSI")
+int rsiOversold = input.int(
+     30, "RSI oversold", minval = 1, maxval = 50, group = "2. RSI")
+int rsiOverbought = input.int(
+     70, "RSI overbought", minval = 50, maxval = 99, group = "2. RSI")
+
+string signalTf   = modeInput == "Swing (Hourly)" ? "60" : "15"
+string tfNiceName = modeInput == "Swing (Hourly)" ? "60 min" : "15 min"
+bool   chartFasterThanSignal = timeframe.in_seconds() < timeframe.in_seconds(signalTf)
+
+stfRsi() =>
+    ta.rsi(close, rsiLength)
+
+stfRsiClosed() =>
+    ta.rsi(close, rsiLength)[1]
+
+float rsiLive   = request.security(syminfo.tickerid, signalTf, stfRsi(),       gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+float rsiClosed = request.security(syminfo.tickerid, signalTf, stfRsiClosed(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+float rsiVal    = chartFasterThanSignal ? rsiClosed : rsiLive
+
+plot(rsiVal, "RSI", color = #7E57C2, linewidth = 2)
+
+hline(50, "Mid", color = color.new(#787B86, 50), linestyle = hline.style_dotted)
+obsLine = hline(rsiOverbought, "Overbought", color = color.new(#EF5350, 40), linestyle = hline.style_dashed)
+ossLine = hline(rsiOversold,   "Oversold",   color = color.new(#26A69A, 40), linestyle = hline.style_dashed)
+topLine = hline(100, "Top", color = color.new(#EF5350, 100))
+botLine = hline(0,   "Bot", color = color.new(#26A69A, 100))
+fill(obsLine, topLine, color = color.new(#EF5350, 88), title = "Overbought zone")
+fill(ossLine, botLine, color = color.new(#26A69A, 88), title = "Oversold zone")
+fill(obsLine, ossLine, color = color.new(#7E57C2, 94), title = "RSI range")
+
+bgcolor(rsiVal <= rsiOversold ? color.new(#26A69A, 90) : rsiVal >= rsiOverbought ? color.new(#EF5350, 90) : na, title = "RSI zone")
+
+var table hdr = table.new(position.top_left, 1, 1, bgcolor = color.new(#131722, 20), frame_color = #2A2E39, frame_width = 1)
+if barstate.islast
+    table.cell(hdr, 0, 0, modeInput + "  |  RSI  |  " + tfNiceName, text_color = #D1D4DC, text_size = size.small)
