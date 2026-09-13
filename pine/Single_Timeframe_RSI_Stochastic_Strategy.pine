@@ -1,0 +1,218 @@
+//@version=5
+// Single-Timeframe RSI + Stochastic
+//
+// TIMEFRAME DISCIPLINE: RSI and Stochastic are always read from the SAME
+// timeframe. The Mode input is the only TF switch — there is no way to mix
+// hourly Stochastic with 15-minute RSI (or any other pair).
+//
+// Modes
+//   Swing (Hourly)     → RSI(14) + Stochastic(14,3,3) via request.security("60")
+//   Intraday (15-min)  → both via request.security("15")
+//
+// How to switch modes
+//   1. Open this strategy's Settings (cog).
+//   2. Timeframe discipline → Mode.
+//   3. Choose "Swing (Hourly)" or "Intraday (15-min)".
+//   4. Set the SAME Mode on the RSI pane and Stochastic pane scripts.
+//   5. Use a chart at or below the signal TF (≤60m for Swing, ≤15m for Intraday).
+//
+// Entries are evaluated on confirmed (closed) bars only. Lookahead is off.
+
+strategy(
+     title                  = "Single-Timeframe RSI + Stochastic",
+     shorttitle             = "STF RSI Stoch",
+     overlay                = true,
+     pyramiding             = 0,
+     initial_capital        = 100000,
+     default_qty_type       = strategy.percent_of_equity,
+     default_qty_value      = 10,
+     process_orders_on_close = true,
+     calc_on_every_tick     = false,
+     calc_on_order_fills    = false)
+
+// ── Inputs ────────────────────────────────────────────────────────────────
+
+string modeInput = input.string(
+     "Swing (Hourly)",
+     "Mode",
+     options = ["Swing (Hourly)", "Intraday (15-min)"],
+     group   = "1. Timeframe discipline",
+     tooltip = "Both RSI and Stochastic are requested from this one timeframe. They cannot be mixed.")
+
+int rsiLength = input.int(
+     14, "RSI length", minval = 1, group = "2. RSI")
+int rsiOversold = input.int(
+     30, "RSI oversold", minval = 1, maxval = 50, group = "2. RSI",
+     tooltip = "Long when RSI crosses up through this level (leaving oversold).")
+int rsiOverbought = input.int(
+     70, "RSI overbought", minval = 50, maxval = 99, group = "2. RSI",
+     tooltip = "Exit when RSI crosses down through this level.")
+
+int stochLength = input.int(
+     14, "Stochastic length", minval = 1, group = "3. Stochastic")
+int stochSmoothK = input.int(
+     3, "%K smoothing", minval = 1, group = "3. Stochastic")
+int stochSmoothD = input.int(
+     3, "%D smoothing", minval = 1, group = "3. Stochastic")
+int stochOversold = input.int(
+     20, "Stochastic oversold", minval = 1, maxval = 50, group = "3. Stochastic",
+     tooltip = "%K must cross above %D while both readings are under this level.")
+int stochOverbought = input.int(
+     80, "Stochastic overbought", minval = 50, maxval = 99, group = "3. Stochastic",
+     tooltip = "Exit when %K crosses below %D above this level.")
+
+float stopLossPct = input.float(
+     2.0, "Stop-loss %", minval = 0.1, step = 0.1, group = "4. Risk",
+     tooltip = "Protective stop from the average entry price. Can fill intra-bar.")
+
+bool showTable  = input.bool(true,  "Show dashboard table", group = "5. Visuals")
+bool showMarks  = input.bool(true,  "Mark entries / exits", group = "5. Visuals")
+bool showBg     = input.bool(false, "Tint bars while in a long", group = "5. Visuals")
+
+// ── Single-timeframe source ───────────────────────────────────────────────
+// One Mode → one TF string → one request.security context for RSI, %K, and %D.
+
+string signalTf   = modeInput == "Swing (Hourly)" ? "60" : "15"
+string tfNiceName = modeInput == "Swing (Hourly)" ? "60 min (hourly)" : "15 min"
+
+int chartSec  = timeframe.in_seconds()
+int signalSec = timeframe.in_seconds(signalTf)
+bool chartFasterThanSignal = chartSec < signalSec
+bool chartSlowerThanSignal = chartSec > signalSec
+
+// All three series are calculated on signalTf bars (never on mixed TFs).
+// Bodies are inlined (not nested) so request.security compiles cleanly in v5.
+stfRsiStoch() =>
+    float rsiValue = ta.rsi(close, rsiLength)
+    float kValue   = ta.sma(ta.stoch(close, high, low, stochLength), stochSmoothK)
+    float dValue   = ta.sma(kValue, stochSmoothD)
+    [rsiValue, kValue, dValue]
+
+// Previous completed signal-TF bar. Used when the chart is faster than the
+// signal TF so the forming HTF bar cannot move a signal after the fact.
+stfRsiStochClosed() =>
+    float rsiValue = ta.rsi(close, rsiLength)
+    float kValue   = ta.sma(ta.stoch(close, high, low, stochLength), stochSmoothK)
+    float dValue   = ta.sma(kValue, stochSmoothD)
+    [rsiValue[1], kValue[1], dValue[1]]
+
+[rsiLive, kLive, dLive] = request.security(
+     syminfo.tickerid, signalTf, stfRsiStoch(),
+     gaps     = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off)
+
+[rsiClosed, kClosed, dClosed] = request.security(
+     syminfo.tickerid, signalTf, stfRsiStochClosed(),
+     gaps     = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off)
+
+// Chart TF == signal TF: use the current bar (orders already wait for close).
+// Chart TF <  signal TF: use the last closed signal-TF bar (no HTF repaint).
+float rsiVal = chartFasterThanSignal ? rsiClosed : rsiLive
+float kVal   = chartFasterThanSignal ? kClosed   : kLive
+float dVal   = chartFasterThanSignal ? dClosed   : dLive
+
+// ── Signals (bar-close confirmed) ─────────────────────────────────────────
+
+bool rsiLeaveOversold = ta.crossover(rsiVal, rsiOversold)
+bool stochBullCross   = ta.crossover(kVal, dVal)
+bool stochBothOversold = kVal < stochOversold and dVal < stochOversold
+
+bool rsiExitOverbought = ta.crossunder(rsiVal, rsiOverbought)
+bool stochBearCross    = ta.crossunder(kVal, dVal)
+bool stochCrossAboveOB = math.max(kVal, dVal) > stochOverbought
+
+bool dataReady = not na(rsiVal) and not na(kVal) and not na(dVal)
+bool barClosed = barstate.isconfirmed
+
+bool longEntry = dataReady and barClosed and rsiLeaveOversold and stochBullCross and stochBothOversold
+bool stochExit = stochBearCross and stochCrossAboveOB
+bool longExit  = dataReady and barClosed and (rsiExitOverbought or stochExit)
+
+string exitComment = rsiExitOverbought ? "RSI-OB" : "Stoch-OB"
+
+// ── Orders ────────────────────────────────────────────────────────────────
+
+if longEntry and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, comment = "RSI+Stoch")
+
+if strategy.position_size > 0
+    float stopPrice = strategy.position_avg_price * (1.0 - stopLossPct / 100.0)
+    strategy.exit("SL", from_entry = "Long", stop = stopPrice, comment = "Stop")
+    if longExit
+        strategy.close("Long", comment = exitComment)
+
+// ── Chart marks ───────────────────────────────────────────────────────────
+
+plotshape(
+     showMarks and longEntry and strategy.position_size == 0,
+     title      = "Long entry",
+     style      = shape.triangleup,
+     location   = location.belowbar,
+     color      = color.new(#26A69A, 0),
+     size       = size.small,
+     text       = "Long",
+     textcolor  = color.white)
+
+plotshape(
+     showMarks and longExit and strategy.position_size > 0,
+     title      = "Long exit",
+     style      = shape.triangledown,
+     location   = location.abovebar,
+     color      = color.new(#EF5350, 0),
+     size       = size.small,
+     text       = "Exit",
+     textcolor  = color.white)
+
+bgcolor(showBg and strategy.position_size > 0 ? color.new(#26A69A, 92) : na, title = "In long")
+
+// Values in the status line / data window only — never plotted on price.
+plot(rsiVal, "RSI",      color = #7E57C2, display = display.status_line + display.data_window)
+plot(kVal,   "Stoch %K", color = #26A69A, display = display.status_line + display.data_window)
+plot(dVal,   "Stoch %D", color = #FF9800, display = display.status_line + display.data_window)
+
+// ── Dashboard ─────────────────────────────────────────────────────────────
+
+var table dash = table.new(
+     position.top_right, 2, 8,
+     bgcolor      = color.new(#131722, 8),
+     frame_color  = #2A2E39,
+     border_width = 1,
+     border_color = #2A2E39,
+     frame_width  = 1)
+
+color lblColor  = color.new(#787B86, 0)
+color valColor  = color.new(#D1D4DC, 0)
+color okColor   = color.new(#26A69A, 0)
+color warnColor = color.new(#FF9800, 0)
+color hotColor  = color.new(#EF5350, 0)
+color coldColor = color.new(#42A5F5, 0)
+
+if showTable and barstate.islast
+    string posText  = strategy.position_size > 0 ? "Long" : "Flat"
+    color  posColor = strategy.position_size > 0 ? okColor : valColor
+    string tfStatus = chartSlowerThanSignal ? "Drop chart to " + tfNiceName + " or below" : "OK | " + tfNiceName
+    color  tfColor  = chartSlowerThanSignal ? warnColor : okColor
+    string rsiText  = na(rsiVal) ? "n/a" : str.tostring(rsiVal, "#.00")
+    string kText    = na(kVal) ? "n/a" : str.tostring(kVal, "#.00")
+    string dText    = na(dVal) ? "n/a" : str.tostring(dVal, "#.00")
+    color  rsiTextColor = na(rsiVal) ? valColor : rsiVal <= rsiOversold ? coldColor : rsiVal >= rsiOverbought ? hotColor : valColor
+    color  kTextColor   = na(kVal) ? valColor : kVal <= stochOversold ? coldColor : kVal >= stochOverbought ? hotColor : valColor
+    color  dTextColor   = na(dVal) ? valColor : dVal <= stochOversold ? coldColor : dVal >= stochOverbought ? hotColor : valColor
+
+    table.cell(dash, 0, 0, "STF RSI + Stoch", text_color = valColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 0, modeInput, text_color = okColor, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 1, "Timeframe", text_color = lblColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 1, tfStatus, text_color = tfColor, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 2, "RSI(" + str.tostring(rsiLength) + ")", text_color = lblColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 2, rsiText, text_color = rsiTextColor, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 3, "Stoch %K", text_color = lblColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 3, kText, text_color = kTextColor, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 4, "Stoch %D", text_color = lblColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 4, dText, text_color = dTextColor, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 5, "Position", text_color = lblColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 5, posText, text_color = posColor, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 6, "Stop", text_color = lblColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 6, str.tostring(stopLossPct, "#.0") + "%", text_color = valColor, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 7, "Signals", text_color = lblColor, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 7, "Bar-close, lookahead off", text_color = valColor, text_size = size.small, text_halign = text.align_right)
